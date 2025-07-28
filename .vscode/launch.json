@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [{
+      "type": "java",
+      "name": "Run ShamirSecret",
+      "request": "launch",
+      "mainClass": "com.example.ShamirSecret",
+      "projectName": "ShamirSecret",
+      "classPaths": [
+        "${workspaceFolder}/bin",
+        "${workspaceFolder}/lib/json-20220320.jar"
+      ]
+    }]
+  }
+  

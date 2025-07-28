@@ -1,90 +1,93 @@
-# Shamir Secret (Hashira Assessment)
+# Hashira Assessment — Shamir Secret Recovery
 
-A small Java program to recover the **secret** (constant term `c = f(0)`) of a polynomial from its Shamir shares.  
-No external JSON libraries are used — a tolerant regex parser reads the input file.
-
----
-
-## Requirements
-
-- JDK 17+ (tested on 17/21)
-- macOS / Linux / Windows shell
-
-Project layout:
-
-.
-├── src/com/example/ShamirSecret.java
-├── input.json
-├── input2.json
-└── bin/ # created on first compile
-
-yaml
-Copy
-Edit
+Recover the **secret** (the polynomial constant term `c = f(0)`) from Shamir-style shares.  
+This solution is a **single Java file** with a **tolerant JSON reader** (no external libraries) and **exact rational** Lagrange interpolation. It also detects **bad shares**.
 
 ---
 
-## Build
+## 1) Problem Statement
+
+You are given:
+
+- `n`: total number of provided shares.
+- `k`: threshold; the hidden polynomial degree is `m = k - 1`.
+- `n` share entries where each top-level **numeric key** is the `x` coordinate and the object contains:
+  - `base`: radix of the encoded value (e.g., 2, 8, 10, 16).
+  - `value`: either a number encoded in the given `base`, or a small **function expression** (see below).
+
+**Goal**
+
+1. Parse all shares `(x, y)`.
+2. Consider **all** `k`-sized combinations of shares.
+3. For each combination, reconstruct `f(0)` using **Lagrange interpolation** with exact rational arithmetic.
+4. Choose the **most frequent** `f(0)` value as the **secret**.
+5. Mark **bad shares**: shares that are **never** part of any combination yielding the chosen secret.
+
+**Output format**
+
+Total combinations tried: <C>
+Secret (constant term c): <secret>
+Bad shares detected at x: <list or 'None'>
+Top secret frequency: <F>
+
+
+
+---
+
+## 2) Project Structure
+
+
+├── src/com/example/ShamirSecret.java # Single, self-contained source file
+├── input.json # Test case 1
+├── input2.json # Test case 2
+└── bin/ # Compiled classes (created by javac)
+
+
+
+---
+
+## 3) Build
+
+Requires **JDK 17+**.
 
 ```bash
 javac -d bin src/com/example/ShamirSecret.java
-If javac is not found, ensure JDK is installed and on PATH.
-Check versions:
 
-bash
-Copy
-Edit
+
+Check Java availability:
+
 java -version
 javac -version
-Run
-bash
-Copy
-Edit
+
+
+
+4) Run
+
+With input.json
 java -cp bin com.example.ShamirSecret input.json
-# or
+
+With input2.json
 java -cp bin com.example.ShamirSecret input2.json
-Example output
-yaml
-Copy
-Edit
-Total combinations tried: 6
-Secret (constant term c): 42
-Bad shares detected at x: None
-Top secret frequency: 6
-If some shares are inconsistent, you may see a rational:
 
-less
-Copy
-Edit
-Secret (constant term c): 123456789/2
-Bad shares detected at x: [3, 7]
-This means most valid k‑combinations agree on that fractional result.
-(If your task requires the secret to be an integer, treat such cases as data errors, or filter to integer results only.)
+-----
 
-Input format
-The input is a JSON object with:
-
-keys.n – total provided shares
-
-keys.k – threshold (degree m = k-1)
-
-Then n entries where each top‑level numeric key is the share’s x, and its value is an object:
-
-json
-Copy
-Edit
+5) Input Format
 {
-  "keys": { "n": 4, "k": 2 },
-  "1": { "base": 10, "value": "47" },
-  "2": { "base": 10, "value": "52" },
-  "3": { "base": 10, "value": "57" },
-  "4": { "base": 10, "value": "62" }
-}
-The parser is tolerant about spacing and the order of fields.
-base may be quoted or not. value may be quoted or a bare token.
+  "keys": { "n": <int>, "k": <int> },
 
-Function values
-value may also be an expression. Supported functions:
+  "<x1>": { "base": <radix>, "value": "<numberOrFunction>" },
+  "<x2>": { "base": <radix>, "value": "<numberOrFunction>" }
+
+  // ... n total entries
+}
+Top-level numeric keys ("1", "2", …) are the x coordinates.
+
+The parser is order-insensitive and tolerant of spacing and quotes.
+
+base may be quoted or unquoted; value may be quoted or a bare token.
+
+Supported value functions
+If value looks like a function (name(args)), it is evaluated with big integers, with all numbers interpreted in base‑10:
 
 sum(a, b, c, ...) / add(...)
 
@@ -94,166 +97,53 @@ gcd(a, b, ...)
 
 lcm(a, b, ...)
 
-pow(a, b) (non‑negative integer b)
+pow(a, b) — exponent b >= 0
 
-Functions can be nested, e.g. sum(10, mul(2,3))
+Functions can be nested, e.g. sum(10, mul(2,3)).
 
-All numbers in functions are parsed as base‑10.
-If value is not a function, it is parsed in the specified base.
+If value is not a function, it is parsed using the provided base.
 
-Example:
 
-json
-Copy
-Edit
-{
-  "keys": { "n": 3, "k": 2 },
-  "1": { "base": 10, "value": "sum(40,7)" },
-  "2": { "base": 10, "value": "52" },
-  "3": { "base": 16, "value": "39" }   // 0x39 = 57
-}
-What the program prints
-Total combinations tried — number of k-sized combinations tested.
+------
 
-Secret (constant term c) — f(0) derived via exact rational Lagrange interpolation.
 
-Bad shares detected at x — share x positions that never participate in any combination producing the chosen secret.
+6) Sample Runs & Results
+These are the exact results observed on the provided test files.
 
-Top secret frequency — how many combinations yielded the printed secret (useful to see consensus strength).
+✅ Test Case 1 — input.json
+Command:
+java -cp bin com.example.ShamirSecret input.json
+Output:
 
-Algorithm (high level)
-Parse n, k, and all shares (x, y).
 
-Iterate over all size‑k combinations of shares.
+Total combinations tried: 4
+Secret (constant term c): 3
+Bad shares detected at x: None
+Top secret frequency: 4
+Explanation: nCk = 4 combinations and all agree on c = 3. No bad shares.
 
-For each combination, compute f(0) with Lagrange interpolation:
 
-𝑓
-(
-0
-)
-=
-∑
-𝑖
-=
-0
-𝑘
-−
-1
-𝑦
-𝑖
-∏
-𝑗
-≠
-𝑖
-0
-−
-𝑥
-𝑗
-𝑥
-𝑖
-−
-𝑥
-𝑗
-f(0)= 
-i=0
-∑
-k−1
-​
- y 
-i
-​
-  
-j
-
-=i
-∏
-​
-  
-x 
-i
-​
- −x 
-j
-​
+
+✅ Test Case 2 — input2.json
+Command:
+
+java -cp bin com.example.ShamirSecret input2.json
+Output:
+
+Total combinations tried: 120
+Secret (constant term c): 79836264049851
+Bad shares detected at x: [8]
+Top secret frequency: 36
+
+
+
+7) Method & Rationale
+Parsing: Lightweight, regex-based reader (no external org.json). Tolerant of order, whitespace, and quoting.
+
+Function evaluation: Simple evaluator for basic arithmetic functions with BigInteger.
+
+Interpolation: Exact rational arithmetic (Fraction type) prevents rounding errors:
  
-0−x 
-j
-​
- 
-​
- 
-This implementation uses an exact rational Fraction type to avoid precision loss.
+Consensus: Count frequency of each f(0). Choose the mode (most frequent value).
 
-Count frequencies of resulting f(0) values, choose the most frequent.
-
-Mark any share that appears in at least one agreeing combination as good; the rest are bad.
-
-Complexity:
-
-(
-𝑛
-𝑘
-)
-( 
-k
-n
-​
- )
-combinations; each interpolation is 
-𝑂
-(
-𝑘
-2
-)
-O(k 
-2
- ). Works well for the small n typical of assessments.
-
-Troubleshooting
-“Warning: parsed shares (0) != n (…)"
-The parser didn’t recognize your shares. Check that top-level keys are numeric ("1", "2", …) and each has base and value. If you use different function names or nested structures, share a sample and adapt the parser.
-
-IllegalArgumentException: Could not find pattern
-keys.n or keys.k missing or malformed.
-
-Fractional secret but you expect integer
-Input likely contains one or more wrong shares. You can post‑filter to integer results only, or increase k consensus logic. Ask if you want an “integer-only” mode.
-
-VS Code Run Config (optional)
-Create .vscode/launch.json:
-
-json
-Copy
-Edit
-{
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "type": "java",
-      "name": "Run ShamirSecret (input.json)",
-      "request": "launch",
-      "mainClass": "com.example.ShamirSecret",
-      "classPaths": ["bin"],
-      "args": "input.json",
-      "preLaunchTask": "javac build"
-    }
-  ]
-}
-And .vscode/tasks.json:
-
-json
-Copy
-Edit
-{
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "javac build",
-      "type": "shell",
-      "command": "javac -d bin src/com/example/ShamirSecret.java",
-      "problemMatcher": ["$javac"]
-    }
-  ]
-}
-Then Run and Debug → Run ShamirSecret (input.json).
+Bad shares: A share is “good” if it occurs in any combination producing the chosen secret; else it is reported as bad.

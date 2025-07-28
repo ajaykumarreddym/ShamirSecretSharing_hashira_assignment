@@ -8,6 +8,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -18,7 +19,7 @@ public class ShamirSecret {
 
     public static void main(String[] args) throws Exception {
         if (args.length != 1) {
-            System.err.println("Usage: java com.example.ShamirSecret <input.json>");
+            System.err.println("Usage: java -cp bin com.example.ShamirSecret <input.json>");
             System.exit(1);
         }
 
@@ -28,43 +29,34 @@ public class ShamirSecret {
         int n = extractInt(json, "\"keys\"\\s*:\\s*\\{[^}]*?\"n\"\\s*:\\s*(\\d+)");
         int k = extractInt(json, "\"keys\"\\s*:\\s*\\{[^}]*?\"k\"\\s*:\\s*(\\d+)");
 
-        // --- parse shares: "x": {"base": B, "value": "V"} ---
-        List<Point> shares = new ArrayList<>();
-        Pattern pShare = Pattern.compile(
-                "\"(\\d+)\"\\s*:\\s*\\{\\s*\"base\"\\s*:\\s*(\\d+)\\s*,\\s*\"value\"\\s*:\\s*\"([^\"]+)\"\\s*\\}",
-                Pattern.DOTALL);
-        Matcher m = pShare.matcher(json);
-        while (m.find()) {
-            String xStr = m.group(1);
-            // Ensure we don't accidentally parse the "keys" object (it’s not numeric anyway)
-            int base = Integer.parseInt(m.group(2));
-            String val = m.group(3);
-            BigInteger x = new BigInteger(xStr);
-            BigInteger y = new BigInteger(val, base);
-            shares.add(new Point(x, y));
-        }
+        // --- parse shares robustly ---
+        List<Point> shares = parseShares(json);
 
         if (shares.size() != n) {
             System.err.println("Warning: parsed shares (" + shares.size() + ") != n (" + n + ")");
         }
+        if (shares.size() < k) {
+            throw new IllegalArgumentException("Not enough shares to satisfy k. Parsed=" + shares.size() + ", k=" + k);
+        }
 
-        // --- enumerate all k-combinations and vote on the constant term ---
+        // --- enumerate all k-combinations and vote for constant term f(0) ---
         Map<Fraction, Integer> counts = new HashMap<>();
         int[] totalCombos = {0};
         combine(shares, k, 0, new ArrayList<>(), counts, totalCombos);
 
         Map.Entry<Fraction, Integer> top = counts.entrySet()
-                .stream().max(Map.Entry.comparingByValue()).orElseThrow();
+                .stream().max(Map.Entry.comparingByValue())
+                .orElseThrow(() -> new IllegalStateException("No combinations produced a result"));
 
         Fraction secret = top.getKey();
         int frequency = top.getValue();
 
-        // --- detect bad shares (those never appearing in any combo yielding the chosen secret) ---
+        // --- detect bad shares (never appear in combos yielding chosen secret) ---
         Set<BigInteger> goodXs = new HashSet<>();
         markGood(shares, k, secret, 0, new ArrayList<>(), goodXs);
 
         List<BigInteger> badXs = new ArrayList<>();
-        for (Point pnt : shares) if (!goodXs.contains(pnt.x)) badXs.add(pnt.x);
+        for (Point p : shares) if (!goodXs.contains(p.x)) badXs.add(p.x);
         Collections.sort(badXs);
 
         // --- print ---
@@ -75,13 +67,131 @@ public class ShamirSecret {
         System.out.println("Top secret frequency: " + frequency);
     }
 
-    // ---- helpers ----
+    // ---------------- Parsing ----------------
+
+    /**
+     * Parse all top-level numeric-keyed entries:  "1": { ... }, "2": { ... } ...
+     * Accepts base and value in any order; base as number or quoted; value as quoted or bare token
+     * and supports function values like sum(...), mul(...), gcd(...), lcm(...), pow(a,b).
+     */
+    static List<Point> parseShares(String json) {
+        List<Point> shares = new ArrayList<>();
+
+        // Grab pairs like:  "123": { <body> }
+        Pattern entry = Pattern.compile("\"(\\d+)\"\\s*:\\s*\\{(.*?)\\}", Pattern.DOTALL);
+        Matcher m = entry.matcher(json);
+        while (m.find()) {
+            String xKey = m.group(1);
+            String body = m.group(2);
+
+            // Extract base
+            Integer base = null;
+            Matcher mb = Pattern.compile("\"base\"\\s*:\\s*(?:\"(\\d+)\"|(\\d+))").matcher(body);
+            if (mb.find()) {
+                base = Integer.parseInt(mb.group(1) != null ? mb.group(1) : mb.group(2));
+            }
+
+            // Extract value (string or bare token)
+            String valueRaw = null;
+            Matcher mv = Pattern.compile("\"value\"\\s*:\\s*(?:\"([^\"]+)\"|([^,}\\s]+))").matcher(body);
+            if (mv.find()) {
+                valueRaw = mv.group(1) != null ? mv.group(1) : mv.group(2);
+            }
+
+            if (base == null || valueRaw == null) {
+                // not a share entry
+                continue;
+            }
+
+            BigInteger x = new BigInteger(xKey);
+            BigInteger y;
+
+            // If looks like a function e.g., sum(1,2,3) handle; else parse in given base.
+            if (looksLikeFunction(valueRaw)) {
+                y = evalFunction(valueRaw.trim());
+            } else {
+                y = new BigInteger(valueRaw.trim(), base);
+            }
+
+            shares.add(new Point(x, y));
+        }
+
+        return shares;
+    }
+
+    static boolean looksLikeFunction(String s) {
+        return s.matches("[A-Za-z_][A-Za-z_0-9]*\\s*\\(.*\\)");
+    }
+
+    /**
+     * Very small evaluator for functions:
+     *  sum(...), add(...), mul(...), prod(...), gcd(...), lcm(...), pow(a,b)
+     *  Numbers are parsed in base-10.
+     */
+    static BigInteger evalFunction(String expr) {
+        Matcher mm = Pattern.compile("^\\s*([A-Za-z_][A-Za-z_0-9]*)\\s*\\((.*)\\)\\s*$", Pattern.DOTALL).matcher(expr);
+        if (!mm.find()) throw new IllegalArgumentException("Bad function syntax: " + expr);
+        String name = mm.group(1).toLowerCase(Locale.ROOT);
+        String inside = mm.group(2);
+
+        List<BigInteger> args = new ArrayList<>();
+        // split by commas that are not nested (we assume no nested function args with commas in strings)
+        for (String part : inside.split(",")) {
+            String t = part.trim();
+            if (t.isEmpty()) continue;
+            // allow nested simple functions
+            if (looksLikeFunction(t)) {
+                args.add(evalFunction(t));
+            } else {
+                args.add(new BigInteger(t));
+            }
+        }
+
+        switch (name) {
+            case "sum":
+            case "add":
+                return args.stream().reduce(BigInteger.ZERO, BigInteger::add);
+            case "mul":
+            case "prod":
+                return args.stream().reduce(BigInteger.ONE, BigInteger::multiply);
+            case "gcd": {
+                if (args.isEmpty()) return BigInteger.ZERO;
+                BigInteger g = args.get(0).abs();
+                for (int i = 1; i < args.size(); i++) g = g.gcd(args.get(i).abs());
+                return g;
+            }
+            case "lcm": {
+                if (args.isEmpty()) return BigInteger.ZERO;
+                BigInteger l = args.get(0).abs();
+                for (int i = 1; i < args.size(); i++) {
+                    BigInteger a = l.abs(), b = args.get(i).abs();
+                    if (a.equals(BigInteger.ZERO) || b.equals(BigInteger.ZERO)) {
+                        l = BigInteger.ZERO;
+                    } else {
+                        l = a.divide(a.gcd(b)).multiply(b);
+                    }
+                }
+                return l;
+            }
+            case "pow": {
+                if (args.size() != 2) throw new IllegalArgumentException("pow expects 2 args, got " + args.size());
+                BigInteger a = args.get(0);
+                int b = args.get(1).intValueExact();
+                if (b < 0) throw new IllegalArgumentException("pow exponent must be >= 0");
+                return a.pow(b);
+            }
+            default:
+                throw new IllegalArgumentException("Unsupported function: " + name);
+        }
+    }
 
     static int extractInt(String s, String regex) {
         Matcher m = Pattern.compile(regex, Pattern.DOTALL).matcher(s);
         if (!m.find()) throw new IllegalArgumentException("Could not find pattern: " + regex);
         return Integer.parseInt(m.group(1));
     }
+
+    // ---------------- Math / interpolation ----------------
 
     static class Point {
         final BigInteger x, y;
@@ -103,9 +213,7 @@ public class ShamirSecret {
         }
     }
 
-    /**
-     * Lagrange interpolation to compute f(0) (constant term) exactly using rationals.
-     */
+    /** Lagrange interpolation: compute f(0) exactly using rationals. */
     static Fraction interpConstant(List<Point> pts) {
         Fraction res = Fraction.ZERO;
         int k = pts.size();
@@ -139,7 +247,8 @@ public class ShamirSecret {
         }
     }
 
-    // ---- exact rational type ----
+    // ---------------- exact rational type ----------------
+
     static final class Fraction {
         static final Fraction ZERO = new Fraction(BigInteger.ZERO, BigInteger.ONE);
         static final Fraction ONE  = new Fraction(BigInteger.ONE,  BigInteger.ONE);
@@ -151,9 +260,7 @@ public class ShamirSecret {
 
         Fraction(BigInteger n, BigInteger d) {
             if (d.equals(BigInteger.ZERO)) throw new ArithmeticException("denominator 0");
-            // normalize sign
             if (d.signum() < 0) { n = n.negate(); d = d.negate(); }
-            // reduce
             BigInteger g = n.gcd(d);
             if (!g.equals(BigInteger.ONE)) { n = n.divide(g); d = d.divide(g); }
             this.num = n; this.den = d;
